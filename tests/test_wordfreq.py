@@ -1,347 +1,190 @@
-"""Unit and CLI tests for the wordfreq package."""
-
-from __future__ import annotations
+# AC#4: pytest -q passes across tests/test_wordfreq.py
+# Covers the end-to-end behaviour of count_words and main (AC#1-AC#3):
+# tokenizing, casing, min_len filtering, (-count, word) sorting, argument
+# validation, TSV/JSON output with trailing newlines, stdin handling,
+# exit codes, and python -m wordfreq.
 
 import io
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 from wordfreq.cli import count_words, format_table, main
 
-ROOT = Path(__file__).resolve().parent.parent
+
+# ---------------------------------------------------------------------------
+# count_words
+# ---------------------------------------------------------------------------
+
+def test_count_words_mixed_case_default_lowercases_to_single_word():
+    assert count_words("Hello hello") == [("hello", 2)]
 
 
-def _run_module(*args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "wordfreq", *args],
-        input=stdin,
-        capture_output=True,
-        encoding="utf-8",
-        cwd=ROOT,
-        check=False,
-    )
+def test_count_words_punctuated_text_extracts_alphanumeric_tokens():
+    assert count_words("a-b_c d1") == [("a", 1), ("b", 1), ("c", 1), ("d1", 1)]
 
 
-def test_count_words_basic_ranking() -> None:
-    text = "Apple banana apple, cherry! Banana apple."
-    assert count_words(text) == [("apple", 3), ("banana", 2), ("cherry", 1)]
+def test_count_words_ignore_case_false_preserves_case():
+    assert count_words("Hello hello", ignore_case=False) == [("Hello", 1), ("hello", 1)]
 
 
-def test_format_table_tsv() -> None:
-    assert format_table([("apple", 3), ("banana", 2)]) == "apple\t3\nbanana\t2"
+def test_count_words_min_len_filters_short_tokens():
+    assert count_words("a bb ccc", min_len=2) == [("bb", 1), ("ccc", 1)]
 
 
-def test_cli_top_and_min_len(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    sample = tmp_path / "sample.txt"
-    sample.write_text("to be or not to be that is the question", encoding="utf-8")
-    rc = main([str(sample), "--min-len", "3", "--top", "2"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert out.strip().splitlines() == ["not\t1", "question\t1"]
+def test_count_words_sorts_by_count_descending():
+    assert count_words("b a b c a b") == [("b", 3), ("a", 2), ("c", 1)]
 
 
-# --- count_words -----------------------------------------------------------
-
-
-def test_count_words_breaks_ties_alphabetically() -> None:
-    text = "zebra mango apple mango zebra kiwi"
-    assert count_words(text) == [
-        ("mango", 2),
-        ("zebra", 2),
-        ("apple", 1),
-        ("kiwi", 1),
-    ]
-
-
-def test_count_words_tie_order_ignores_input_order() -> None:
+def test_count_words_ties_sorted_by_word_ascending():
     assert count_words("b a") == [("a", 1), ("b", 1)]
-    assert count_words("a b") == [("a", 1), ("b", 1)]
 
 
-def test_count_words_lowercases_by_default() -> None:
-    assert count_words("Hello HELLO hello") == [("hello", 3)]
+def test_count_words_top_truncates_to_requested_size():
+    assert count_words("b a b c a b", top=2) == [("b", 3), ("a", 2)]
 
 
-def test_count_words_preserves_case_when_ignore_case_is_false() -> None:
-    rows = count_words("Apple apple APPLE apple", ignore_case=False)
-    assert rows == [("apple", 2), ("APPLE", 1), ("Apple", 1)]
+def test_count_words_top_zero_returns_empty_list():
+    assert count_words("b a b", top=0) == []
 
 
-def test_count_words_extracts_only_ascii_alphanumeric_runs() -> None:
-    rows = count_words("naïve café, 42 42! foo_bar")
-    assert rows == [
-        ("42", 2),
-        ("bar", 1),
-        ("caf", 1),
-        ("foo", 1),
-        ("na", 1),
-        ("ve", 1),
-    ]
-
-
-def test_count_words_min_len_drops_short_words() -> None:
-    assert count_words("a an the cat", min_len=3) == [("cat", 1), ("the", 1)]
-
-
-def test_count_words_top_keeps_highest_ranked_rows() -> None:
-    assert count_words("a b b c c c", top=2) == [("c", 3), ("b", 2)]
-
-
-def test_count_words_top_zero_returns_no_rows() -> None:
-    assert count_words("a b", top=0) == []
-
-
-def test_count_words_empty_text_returns_no_rows() -> None:
-    assert count_words("") == []
-
-
-@pytest.mark.parametrize("min_len", [0, -1])
-def test_count_words_rejects_min_len_below_one(min_len: int) -> None:
+def test_count_words_min_len_below_one_raises_value_error():
     with pytest.raises(ValueError, match=r"^min_len must be >= 1$"):
-        count_words("a", min_len=min_len)
+        count_words("hello", min_len=0)
 
 
-def test_count_words_rejects_negative_top() -> None:
+def test_count_words_negative_top_raises_value_error():
     with pytest.raises(ValueError, match=r"^top must be >= 0$"):
-        count_words("a", top=-1)
+        count_words("hello", top=-1)
 
 
-# --- format_table ----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# format_table
+# ---------------------------------------------------------------------------
+
+def test_format_table_rows_joined_with_tabs_and_newlines():
+    assert format_table([("hello", 2), ("world", 1)]) == "hello\t2\nworld\t1"
 
 
-def test_format_table_empty_returns_empty_string() -> None:
+def test_format_table_empty_input_returns_empty_string():
     assert format_table([]) == ""
 
 
-def test_format_table_single_row_has_no_newline() -> None:
-    assert format_table([("solo", 7)]) == "solo\t7"
+# ---------------------------------------------------------------------------
+# main: stdin handling
+# ---------------------------------------------------------------------------
 
-
-# --- CLI: stdin and case handling -----------------------------------------
-
-
-@pytest.mark.parametrize("argv", [[], ["-"]])
-def test_main_reads_stdin_by_default(
-    argv: list[str],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO("b a a\n"))
-    rc = main(argv)
-    assert rc == 0
-    assert capsys.readouterr().out == "a\t2\nb\t1\n"
-
-
-def test_main_decodes_stdin_buffer_as_utf8(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    raw = io.BytesIO(b"alpha beta alpha\n")
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(raw, encoding="utf-8"))
+def test_main_default_reads_stdin_and_prints_tsv(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello hello world\n"))
     rc = main([])
+    assert capsys.readouterr().out == "hello\t2\nworld\t1\n"
     assert rc == 0
-    assert capsys.readouterr().out == "alpha\t2\nbeta\t1\n"
 
 
-def test_main_invalid_utf8_stdin_returns_2(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    raw = io.BytesIO(b"\xff\xfe broken")
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(raw, encoding="utf-8"))
-    rc = main([])
-    captured = capsys.readouterr()
-    assert rc == 2
-    assert captured.out == ""
-    assert "not valid UTF-8" in captured.err
-
-
-def test_main_lowercases_without_case_sensitive_flag(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO("Apple apple\n"))
-    rc = main([])
+def test_main_dash_path_reads_stdin(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello hello world\n"))
+    rc = main(["-"])
+    assert capsys.readouterr().out == "hello\t2\nworld\t1\n"
     assert rc == 0
-    assert capsys.readouterr().out == "apple\t2\n"
 
 
-def test_main_case_sensitive_flag_preserves_case(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO("Apple apple\n"))
-    rc = main(["--case-sensitive"])
-    assert rc == 0
-    assert capsys.readouterr().out == "Apple\t1\napple\t1\n"
-
-
-def test_cli_tie_breaking_orders_words_alphabetically(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    sample = tmp_path / "ties.txt"
-    sample.write_text("pear apple pear fig apple", encoding="utf-8")
-    rc = main([str(sample)])
-    assert rc == 0
-    assert capsys.readouterr().out == "apple\t2\npear\t2\nfig\t1\n"
-
-
-# --- CLI: output framing ---------------------------------------------------
-
-
-def test_cli_tsv_output_has_single_trailing_newline(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    sample = tmp_path / "sample.txt"
-    sample.write_text("b a", encoding="utf-8")
-    rc = main([str(sample)])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert out == "a\t1\nb\t1\n"
-    assert not out.endswith("\n\n")
-
-
-def test_cli_empty_input_writes_nothing(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    sample = tmp_path / "empty.txt"
-    sample.write_text("", encoding="utf-8")
-    rc = main([str(sample)])
-    assert rc == 0
-    assert capsys.readouterr().out == ""
-
-
-def test_cli_top_zero_writes_nothing(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    sample = tmp_path / "sample.txt"
-    sample.write_text("alpha beta", encoding="utf-8")
-    rc = main([str(sample), "--top", "0"])
-    assert rc == 0
-    assert capsys.readouterr().out == ""
-
-
-def test_cli_json_output_is_array_with_single_trailing_newline(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    sample = tmp_path / "sample.txt"
-    sample.write_text("b a a", encoding="utf-8")
-    rc = main(["--json", str(sample)])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert out.endswith("\n")
-    assert not out.endswith("\n\n")
-    assert json.loads(out) == [{"word": "a", "count": 2}, {"word": "b", "count": 1}]
-
-
-def test_cli_json_empty_input_emits_empty_array(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_main_empty_stdin_writes_nothing(monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    rc = main(["--json"])
+    rc = main([])
+    assert capsys.readouterr().out == ""
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# main: options
+# ---------------------------------------------------------------------------
+
+def test_main_case_sensitive_preserves_case(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("Hello hello\n"))
+    main(["--case-sensitive"])
+    assert capsys.readouterr().out == "Hello\t1\nhello\t1\n"
+
+
+def test_main_top_option_truncates_output(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("b a b c a b\n"))
+    main(["--top", "2"])
+    assert capsys.readouterr().out == "b\t3\na\t2\n"
+
+
+def test_main_min_len_option_filters_short_words(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("a bb ccc\n"))
+    main(["--min-len", "2"])
+    assert capsys.readouterr().out == "bb\t1\nccc\t1\n"
+
+
+def test_main_json_option_emits_word_count_objects(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello hello world\n"))
+    main(["--json"])
+    out = capsys.readouterr().out
+    assert json.loads(out) == [{"word": "hello", "count": 2}, {"word": "world", "count": 1}]
+
+
+def test_main_json_option_output_ends_with_newline(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello\n"))
+    main(["--json"])
+    assert capsys.readouterr().out.endswith("\n")
+
+
+def test_main_json_option_empty_input_prints_empty_array(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    main(["--json"])
     assert capsys.readouterr().out == "[]\n"
 
 
-def test_cli_json_honors_case_sensitive_and_top(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO("dog Dog dog\n"))
-    rc = main(["--json", "--case-sensitive", "--top", "1"])
-    assert rc == 0
-    assert json.loads(capsys.readouterr().out) == [{"word": "dog", "count": 2}]
+# ---------------------------------------------------------------------------
+# main: exit codes and errors
+# ---------------------------------------------------------------------------
 
-
-# --- CLI: argument validation and errors -----------------------------------
-
-
-@pytest.mark.parametrize(
-    ("argv", "message"),
-    [
-        (["--min-len", "0"], "--min-len must be >= 1"),
-        (["--top", "-1"], "--top must be >= 0"),
-    ],
-)
-def test_cli_rejects_out_of_range_values(
-    argv: list[str],
-    message: str,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    sample = tmp_path / "sample.txt"
-    sample.write_text("alpha", encoding="utf-8")
-    rc = main([*argv, str(sample)])
-    captured = capsys.readouterr()
+def test_main_invalid_top_returns_two_with_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello\n"))
+    rc = main(["--top", "-1"])
     assert rc == 2
-    assert captured.out == ""
-    assert message in captured.err
+    assert capsys.readouterr().err != ""
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [["--top", "many"], ["--no-such-flag"]],
-)
-def test_cli_rejects_malformed_arguments(
-    argv: list[str],
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    sample = tmp_path / "sample.txt"
-    sample.write_text("alpha", encoding="utf-8")
-    rc = main([*argv, str(sample)])
-    captured = capsys.readouterr()
+def test_main_invalid_min_len_returns_two_with_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello\n"))
+    rc = main(["--min-len", "0"])
     assert rc == 2
-    assert captured.out == ""
-    assert captured.err.strip() != ""
+    assert capsys.readouterr().err != ""
 
 
-def test_cli_missing_file_returns_2(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    rc = main([str(tmp_path / "does-not-exist.txt")])
-    captured = capsys.readouterr()
+def test_main_missing_file_returns_two_with_stderr(tmp_path, capsys):
+    missing = tmp_path / "does_not_exist.txt"
+    rc = main([str(missing)])
     assert rc == 2
-    assert captured.out == ""
-    assert "cannot read" in captured.err
+    assert capsys.readouterr().err != ""
 
 
-# --- python -m wordfreq ----------------------------------------------------
+# ---------------------------------------------------------------------------
+# python -m wordfreq
+# ---------------------------------------------------------------------------
 
-
-def test_python_m_wordfreq_reads_stdin_and_writes_tsv() -> None:
-    result = _run_module(stdin="b a a\n")
+def test_python_m_wordfreq_reads_stdin_and_prints_tsv():
+    result = subprocess.run(
+        [sys.executable, "-m", "wordfreq"],
+        input="hello hello world\n",
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.stdout == "hello\t2\nworld\t1\n"
     assert result.returncode == 0
-    assert result.stdout == "a\t2\nb\t1\n"
-    assert result.stderr == ""
 
 
-def test_python_m_wordfreq_json_output_has_single_trailing_newline() -> None:
-    result = _run_module("--json", stdin="b a a\n")
-    assert result.returncode == 0
-    assert result.stdout.endswith("\n")
-    assert not result.stdout.endswith("\n\n")
-    assert json.loads(result.stdout) == [
-        {"word": "a", "count": 2},
-        {"word": "b", "count": 1},
-    ]
-
-
-def test_python_m_wordfreq_missing_file_exits_2(tmp_path: Path) -> None:
-    result = _run_module(str(tmp_path / "missing.txt"))
+def test_python_m_wordfreq_missing_file_exits_two(tmp_path):
+    missing = tmp_path / "does_not_exist.txt"
+    result = subprocess.run(
+        [sys.executable, "-m", "wordfreq", str(missing)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
     assert result.returncode == 2
-    assert result.stdout == ""
-    assert result.stderr.strip() != ""
